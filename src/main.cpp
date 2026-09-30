@@ -1,57 +1,138 @@
 #include "Arduino.h"
-// RGB-лента 12 В + Arduino Nano + MOSFET-модули
-// При включении питания - белый
-// Каждое нажатие кнопки - следующий цвет по кругу:
-//   белый -> жёлтый -> оранжевый -> красный -> зелёный -> (снова белый)
+// ================== НАСТРОЙКИ ==================
+// Закомментируйте строку ниже, чтобы отключить включение/выключение удержанием.
+// Тогда светодиод работает сразу после подачи питания, а кнопка только переключает режимы.
+#define onOff
 
-// ---- Пины ----
-const byte PIN_R   = 9;
-const byte PIN_G   = 10;
-const byte PIN_B   = 11;
-const byte PIN_BTN = 2;    // кнопка между D2 и GND
+#define BUTTON_PIN 2   // кнопка между пином 2 и GND
+#define LED_PIN 13     // светодиод через резистор 220 Ом (пин с ШИМ для режима "дыхание")
+#define HOLD_TIME 1000 // время удержания для вкл/выкл, мс
+#define DEBOUNCE 50    // защита от дребезга, мс
+#define MODES 5        // количество режимов
+// ===============================================
+void handleButton();
+void runMode();
+void blink(unsigned long now, unsigned int onTime, unsigned int offTime);
+byte mode = 0;
 
-// ---- Цвета (R, G, B: 0..255) ----
-struct Color { byte r, g, b; };
-const Color colors[] = {
-  {255, 255, 255},   // белый (при включении)
-  {255, 130,   0},   // жёлтый (если зеленит - уменьшите второе число)
-  {255,  60,   0},   // оранжевый (если желтит - уменьшите второе число)
-  {255,   0,   0},   // красный
-  {  0, 255,   0},   // зелёный
-};
-const byte NUM = sizeof(colors) / sizeof(colors[0]);
+#ifdef onOff
+bool enabled = false; // при старте выключено, включается удержанием 1 сек
+#else
+bool enabled = true; // режим вкл/выкл отключён — светодиод работает сразу
+#endif
 
-const unsigned long DEBOUNCE = 30;  // мс, защита от дребезга кнопки
+// Состояние кнопки
+bool lastReading = HIGH;
+bool stableState = HIGH;
+unsigned long lastChange = 0;
+unsigned long pressStart = 0;
+bool holdDone = false;
 
-byte idx = 0;
-
-void show() {
-  analogWrite(PIN_R, colors[idx].r);
-  analogWrite(PIN_G, colors[idx].g);
-  analogWrite(PIN_B, colors[idx].b);
+void setup()
+{
+  Serial.begin(9600);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(LED_PIN, OUTPUT);
 }
 
-void setup() {
-  pinMode(PIN_R, OUTPUT);
-  pinMode(PIN_G, OUTPUT);
-  pinMode(PIN_B, OUTPUT);
-  pinMode(PIN_BTN, INPUT_PULLUP);
-  show();                            // сразу белый
+void loop()
+{
+  handleButton();
+
+  if (enabled)
+  {
+    runMode();
+  }
+  else
+  {
+    analogWrite(LED_PIN, 0);
+  }
 }
 
-void loop() {
-  static bool pressed = false;
-  static unsigned long lastChange = 0;
-
-  bool btn = (digitalRead(PIN_BTN) == LOW);
+// ---------- Обработка кнопки ----------
+void handleButton()
+{
+  bool reading = digitalRead(BUTTON_PIN);
   unsigned long now = millis();
 
-  if (btn != pressed && now - lastChange > DEBOUNCE) {
-    pressed = btn;
+  if (reading != lastReading)
+  {
     lastChange = now;
-    if (pressed) {                   // момент нажатия
-      idx = (idx + 1) % NUM;
-      show();
+    lastReading = reading;
+  }
+
+  // Состояние стабильно дольше DEBOUNCE — принимаем его
+  if (now - lastChange > DEBOUNCE && reading != stableState)
+  {
+    stableState = reading;
+
+    if (stableState == LOW)
+    { // кнопку нажали
+      pressStart = now;
+      holdDone = false;
+    }
+    else
+    { // кнопку отпустили
+      if (!holdDone && enabled)
+      { // короткое нажатие — следующий режим
+        mode = (mode + 1) % MODES;
+        Serial.print("Режим: ");
+        Serial.println(mode + 1);
+      }
     }
   }
+
+#ifdef onOff
+  // Удержание 1 секунду — вкл/выкл (срабатывает, не дожидаясь отпускания)
+  if (stableState == LOW && !holdDone && now - pressStart >= HOLD_TIME)
+  {
+    enabled = !enabled;
+    holdDone = true;
+    Serial.println(enabled ? "Включено" : "Выключено");
+  }
+#endif
+}
+
+// ---------- Режимы ----------
+void runMode()
+{
+  unsigned long now = millis();
+
+  switch (mode)
+  {
+  case 0: // 1. Горит постоянно
+    analogWrite(LED_PIN, 255);
+    break;
+
+  case 1: // 2. Медленное мигание
+    blink(now, 500, 500);
+    break;
+
+  case 2: // 3. Быстрое мигание
+    blink(now, 100, 100);
+    break;
+
+  case 3:
+  { // 4. Двойная вспышка (стробоскоп)
+    unsigned long t = now % 1000;
+    bool on = (t < 80) || (t >= 160 && t < 240);
+    analogWrite(LED_PIN, on ? 255 : 0);
+    break;
+  }
+
+  case 4:
+  { // 5. Плавное "дыхание"
+    unsigned long t = now % 2000;
+    int value = (t < 1000) ? t * 255 / 1000 : (2000 - t) * 255 / 1000;
+    analogWrite(LED_PIN, value);
+    break;
+  }
+  }
+}
+
+// Мигание без delay(): onTime мс горит, offTime мс не горит
+void blink(unsigned long now, unsigned int onTime, unsigned int offTime)
+{
+  bool on = (now % (onTime + offTime)) < onTime;
+  analogWrite(LED_PIN, on ? 255 : 0);
 }
