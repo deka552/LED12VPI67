@@ -1,29 +1,49 @@
 #include "Arduino.h"
+// RGB-лента 12 В + Arduino Nano + MOSFET-модули
+// Короткое нажатие - следующий цвет по кругу:
+//   белый -> жёлтый -> оранжевый -> красный -> зелёный -> (снова белый)
+// Удержание 1 секунду - включение / выключение ленты
+
 // ================== НАСТРОЙКИ ==================
 // Закомментируйте строку ниже, чтобы отключить включение/выключение удержанием.
-// Тогда светодиод работает сразу после подачи питания, а кнопка только переключает режимы.
-// #define onOff
+// Тогда лента загорается белым сразу после подачи питания, а кнопка только меняет цвета.
+#define onOff
 
-#define BUTTON_PIN 2   // кнопка между пином 2 и GND
-#define LED_PIN 13     // светодиод через резистор 220 Ом (пин с ШИМ для режима "дыхание")
-#define HOLD_TIME 1000 // время удержания для вкл/выкл, мс
-#define DEBOUNCE 50    // защита от дребезга, мс
-#define MODES 5        // количество режимов
+#define PIN_R      9      // MOSFET красного канала
+#define PIN_G      10     // MOSFET зелёного канала
+#define PIN_B      11     // MOSFET синего канала
+#define PIN_BTN    2      // кнопка между D2 и +5V, резистор 10 кОм между D2 и GND
+#define BTN_PRESSED HIGH  // нажата = 1, отпущена = 0
+#define HOLD_TIME  1000   // время удержания для вкл/выкл, мс
+#define DEBOUNCE   50     // защита от дребезга, мс
 // ===============================================
+
+// ---- Цвета (R, G, B: 0..255) ----
+struct Color { byte r, g, b; };
+const Color colors[] = {
+  {255, 170, 80},   // белый
+  {255, 130,   0},   // жёлтый (если зеленит - уменьшите второе число)
+  {255,  60,   0},   // оранжевый (если желтит - уменьшите второе число)
+  {255,   0,   0},   // красный
+  {  0, 255,   0},   // зелёный
+};
+const byte NUM = sizeof(colors) / sizeof(colors[0]);
+
 void handleButton();
-void runMode();
-void blink(unsigned long now, unsigned int onTime, unsigned int offTime);
-byte mode = 0;
+void show();
+void ledOff();
+
+byte idx = 0;             // текущий цвет
 
 #ifdef onOff
-bool enabled = false; // при старте выключено, включается удержанием 1 сек
+bool enabled = false;     // при старте выключено, включается удержанием 1 сек
 #else
-bool enabled = true; // режим вкл/выкл отключён — светодиод работает сразу
+bool enabled = true;      // вкл/выкл отключено - лента горит сразу
 #endif
 
 // Состояние кнопки
-bool lastReading = HIGH;
-bool stableState = HIGH;
+bool lastReading = !BTN_PRESSED;
+bool stableState = !BTN_PRESSED;
 unsigned long lastChange = 0;
 unsigned long pressStart = 0;
 bool holdDone = false;
@@ -31,28 +51,24 @@ bool holdDone = false;
 void setup()
 {
   Serial.begin(9600);
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
-  pinMode(LED_PIN, OUTPUT);
+  pinMode(PIN_R, OUTPUT);
+  pinMode(PIN_G, OUTPUT);
+  pinMode(PIN_B, OUTPUT);
+  pinMode(PIN_BTN, INPUT_PULLUP );        // внешний стягивающий резистор к GND
+
+  if (enabled) show();    // без onOff - сразу белый
+  else         ledOff();
 }
 
 void loop()
 {
   handleButton();
-
-  if (enabled)
-  {
-    runMode();
-  }
-  else
-  {
-    analogWrite(LED_PIN, 0);
-  }
 }
 
 // ---------- Обработка кнопки ----------
 void handleButton()
 {
-  bool reading = digitalRead(BUTTON_PIN);
+  bool reading = digitalRead(PIN_BTN);
   unsigned long now = millis();
 
   if (reading != lastReading)
@@ -61,12 +77,12 @@ void handleButton()
     lastReading = reading;
   }
 
-  // Состояние стабильно дольше DEBOUNCE — принимаем его
+  // Состояние стабильно дольше DEBOUNCE - принимаем его
   if (now - lastChange > DEBOUNCE && reading != stableState)
   {
     stableState = reading;
 
-    if (stableState == LOW)
+    if (stableState == BTN_PRESSED)
     { // кнопку нажали
       pressStart = now;
       holdDone = false;
@@ -74,65 +90,39 @@ void handleButton()
     else
     { // кнопку отпустили
       if (!holdDone && enabled)
-      { // короткое нажатие — следующий режим
-        mode = (mode + 1) % MODES;
-        Serial.print("Режим: ");
-        Serial.println(mode + 1);
+      { // короткое нажатие - следующий цвет
+        idx = (idx + 1) % NUM;
+        show();
+        Serial.print("Цвет: ");
+        Serial.println(idx + 1);
       }
     }
   }
 
 #ifdef onOff
-  // Удержание 1 секунду — вкл/выкл (срабатывает, не дожидаясь отпускания)
-  if (stableState == LOW && !holdDone && now - pressStart >= HOLD_TIME)
+  // Удержание 1 секунду - вкл/выкл (срабатывает, не дожидаясь отпускания)
+  if (stableState == BTN_PRESSED && !holdDone && now - pressStart >= HOLD_TIME)
   {
     enabled = !enabled;
     holdDone = true;
+    if (enabled) show();
+    else         ledOff();
     Serial.println(enabled ? "Включено" : "Выключено");
   }
 #endif
 }
 
-// ---------- Режимы ----------
-void runMode()
+// ---------- Вывод цвета ----------
+void show()
 {
-  unsigned long now = millis();
-
-  switch (mode)
-  {
-  case 0: // 1. Горит постоянно
-    analogWrite(LED_PIN, 255);
-    break;
-
-  case 1: // 2. Медленное мигание
-    blink(now, 500, 500);
-    break;
-
-  case 2: // 3. Быстрое мигание
-    blink(now, 100, 100);
-    break;
-
-  case 3:
-  { // 4. Двойная вспышка (стробоскоп)
-    unsigned long t = now % 1000;
-    bool on = (t < 80) || (t >= 160 && t < 240);
-    analogWrite(LED_PIN, on ? 255 : 0);
-    break;
-  }
-
-  case 4:
-  { // 5. Плавное "дыхание"
-    unsigned long t = now % 2000;
-    int value = (t < 1000) ? t * 255 / 1000 : (2000 - t) * 255 / 1000;
-    analogWrite(LED_PIN, value);
-    break;
-  }
-  }
+  analogWrite(PIN_R, colors[idx].r);
+  analogWrite(PIN_G, colors[idx].g);
+  analogWrite(PIN_B, colors[idx].b);
 }
 
-// Мигание без delay(): onTime мс горит, offTime мс не горит
-void blink(unsigned long now, unsigned int onTime, unsigned int offTime)
+void ledOff()
 {
-  bool on = (now % (onTime + offTime)) < onTime;
-  analogWrite(LED_PIN, on ? 255 : 0);
+  analogWrite(PIN_R, 0);
+  analogWrite(PIN_G, 0);
+  analogWrite(PIN_B, 0);
 }
