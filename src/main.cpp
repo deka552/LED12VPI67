@@ -1,29 +1,39 @@
 #include "Arduino.h"
 // RGB-лента 12 В + Arduino Nano + MOSFET-модули
-// Короткое нажатие - следующий цвет по кругу:
-//   белый -> жёлтый -> оранжевый -> красный -> зелёный -> (снова белый)
-// Удержание 1 секунду - включение / выключение ленты
+// После подачи питания лента выключена.
+// Каждое нажатие кнопки - следующий цвет на полной яркости на ON_TIME (10 с),
+// затем лента гаснет. Нажатие во время свечения - сразу следующий цвет,
+// и отсчёт 10 секунд начинается заново.
+// Порядок: белый -> жёлтый -> оранжевый -> красный -> зелёный -> (снова белый)
 
 // ================== НАСТРОЙКИ ==================
-// Закомментируйте строку ниже, чтобы отключить включение/выключение удержанием.
-// Тогда лента загорается белым сразу после подачи питания, а кнопка только меняет цвета.
-#define onOff
+// Как подключена кнопка (оставьте ОДНУ строку):
+#define BTN_TO_GND        // кнопка между D2 и GND, без резистора (INPUT_PULLUP)
+// #define BTN_TO_5V      // кнопка между D2 и +5V, резистор 10 кОм от D2 на GND
 
+// Пины ШИМ. Если D9, D10, D11 сгорели - используем D3, D5, D6.
+// На новой Nano можно вернуть 9, 10, 11.
 #define PIN_R      9      // MOSFET красного канала
-#define PIN_G      10     // MOSFET зелёного канала
+#define PIN_G      10      // MOSFET зелёного канала
 #define PIN_B      11     // MOSFET синего канала
-#define PIN_BTN    2      // кнопка между D2 и +5V, резистор 10 кОм между D2 и GND
-#define BTN_PRESSED HIGH  // нажата = 1, отпущена = 0
-#define HOLD_TIME  1000   // время удержания для вкл/выкл, мс
+#define PIN_BTN    2      // кнопка
+
+#define ON_TIME    3000  // сколько горит цвет после нажатия, мс (10 секунд)
 #define DEBOUNCE   50     // защита от дребезга, мс
 // ===============================================
+
+#ifdef BTN_TO_GND
+  #define BTN_PRESSED LOW
+  #define BTN_MODE    INPUT_PULLUP
+#else
+  #define BTN_PRESSED HIGH
+  #define BTN_MODE    INPUT
+#endif
 
 // ---- Цвета (R, G, B: 0..255) ----
 struct Color { byte r, g, b; };
 const Color colors[] = {
-  // {255, 150,  50},   // тёплый белый
-  {255, 135,  35},   // очень тёплый (как лампа накаливания)
-  // {255, 120,  25},   // свеча, почти янтарный
+  {255, 135,  35},   // белый, очень тёплый
   {255, 130,   0},   // жёлтый (если зеленит - уменьшите второе число)
   {255,  60,   0},   // оранжевый (если желтит - уменьшите второе число)
   {255,   0,   0},   // красный
@@ -32,23 +42,18 @@ const Color colors[] = {
 const byte NUM = sizeof(colors) / sizeof(colors[0]);
 
 void handleButton();
+void handleTimer();
 void show();
 void ledOff();
 
-byte idx = 0;             // текущий цвет
-
-#ifdef onOff
-bool enabled = false;     // при старте выключено, включается удержанием 1 сек
-#else
-bool enabled = true;      // вкл/выкл отключено - лента горит сразу
-#endif
+int  idx = -1;              // -1: ещё ни один цвет не включали (первое нажатие - белый)
+bool isOn = false;          // горит ли сейчас лента
+unsigned long onStart = 0;  // когда включили текущий цвет
 
 // Состояние кнопки
 bool lastReading = !BTN_PRESSED;
 bool stableState = !BTN_PRESSED;
 unsigned long lastChange = 0;
-unsigned long pressStart = 0;
-bool holdDone = false;
 
 void setup()
 {
@@ -56,18 +61,17 @@ void setup()
   pinMode(PIN_R, OUTPUT);
   pinMode(PIN_G, OUTPUT);
   pinMode(PIN_B, OUTPUT);
-  pinMode(PIN_BTN, INPUT_PULLUP );        // внешний стягивающий резистор к GND
-
-  if (enabled) show();    // без onOff - сразу белый
-  else         ledOff();
+  pinMode(PIN_BTN, BTN_MODE);
+  ledOff();                 // при старте лента выключена
 }
 
 void loop()
 {
   handleButton();
+  handleTimer();
 }
 
-// ---------- Обработка кнопки ----------
+// ---------- Кнопка: каждое нажатие - следующий цвет ----------
 void handleButton()
 {
   bool reading = digitalRead(PIN_BTN);
@@ -84,37 +88,30 @@ void handleButton()
   {
     stableState = reading;
 
-    if (stableState == BTN_PRESSED)
-    { // кнопку нажали
-      pressStart = now;
-      holdDone = false;
-    }
-    else
-    { // кнопку отпустили
-      if (!holdDone && enabled)
-      { // короткое нажатие - следующий цвет
-        idx = (idx + 1) % NUM;
-        show();
-        Serial.print("Цвет: ");
-        Serial.println(idx + 1);
-      }
+    if (stableState == BTN_PRESSED)   // срабатываем в момент нажатия
+    {
+      idx = (idx + 1) % NUM;
+      show();
+      isOn = true;
+      onStart = now;                  // отсчёт 10 секунд заново
+      Serial.print("Цвет: ");
+      Serial.println(idx + 1);
     }
   }
-
-#ifdef onOff
-  // Удержание 1 секунду - вкл/выкл (срабатывает, не дожидаясь отпускания)
-  if (stableState == BTN_PRESSED && !holdDone && now - pressStart >= HOLD_TIME)
-  {
-    enabled = !enabled;
-    holdDone = true;
-    if (enabled) show();
-    else         ledOff();
-    Serial.println(enabled ? "Включено" : "Выключено");
-  }
-#endif
 }
 
-// ---------- Вывод цвета ----------
+// ---------- Таймер: через ON_TIME гасим ленту ----------
+void handleTimer()
+{
+  if (isOn && millis() - onStart >= ON_TIME)
+  {
+    ledOff();
+    isOn = false;
+    Serial.println("Выключено (прошло 10 секунд)");
+  }
+}
+
+// ---------- Вывод цвета (полная яркость из таблицы) ----------
 void show()
 {
   analogWrite(PIN_R, colors[idx].r);
