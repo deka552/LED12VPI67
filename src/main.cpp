@@ -18,8 +18,8 @@
 #define PIN_B      11     // MOSFET синего канала
 #define PIN_BTN    2      // кнопка
 
-#define ON_TIME    3000  // сколько горит цвет после нажатия, мс (10 секунд)
-#define DEBOUNCE   50     // защита от дребезга, мс
+#define ON_TIME    10000  // сколько горит цвет после нажатия, мс (10 секунд)
+#define FILTER_MS  20     // фильтр помех кнопки: сколько мс "перевеса" нужно для срабатывания
 // ===============================================
 
 #ifdef BTN_TO_GND
@@ -50,10 +50,10 @@ int  idx = -1;              // -1: ещё ни один цвет не включ
 bool isOn = false;          // горит ли сейчас лента
 unsigned long onStart = 0;  // когда включили текущий цвет
 
-// Состояние кнопки
-bool lastReading = !BTN_PRESSED;
-bool stableState = !BTN_PRESSED;
-unsigned long lastChange = 0;
+// Состояние кнопки (фильтр-накопитель)
+int  btnCount = 0;                  // 0 = точно отпущена, FILTER_MS = точно нажата
+bool btnState = false;              // принятое состояние: true = нажата
+unsigned long lastSample = 0;
 
 void setup()
 {
@@ -72,31 +72,34 @@ void loop()
 }
 
 // ---------- Кнопка: каждое нажатие - следующий цвет ----------
+// Фильтр-накопитель: раз в 1 мс читаем кнопку. "Нажата" - счётчик +1, "отпущена" - счётчик -1.
+// Состояние меняется, только когда счётчик дошёл до края.
+// Отдельные всплески помех от включённой ленты лишь немного сдвигают счётчик
+// и не мешают распознать настоящее нажатие.
 void handleButton()
 {
-  bool reading = digitalRead(PIN_BTN);
   unsigned long now = millis();
+  if (now == lastSample) return;    // опрос раз в 1 мс
+  lastSample = now;
 
-  if (reading != lastReading)
+  bool pressedNow = (digitalRead(PIN_BTN) == BTN_PRESSED);
+
+  if (pressedNow) { if (btnCount < FILTER_MS) btnCount++; }
+  else            { if (btnCount > 0)         btnCount--; }
+
+  if (!btnState && btnCount >= FILTER_MS)   // уверенно нажата
   {
-    lastChange = now;
-    lastReading = reading;
+    btnState = true;
+    idx = (idx + 1) % NUM;
+    show();
+    isOn = true;
+    onStart = now;                  // отсчёт 10 секунд заново
+    Serial.print("Цвет: ");
+    Serial.println(idx + 1);
   }
-
-  // Состояние стабильно дольше DEBOUNCE - принимаем его
-  if (now - lastChange > DEBOUNCE && reading != stableState)
+  else if (btnState && btnCount == 0)       // уверенно отпущена
   {
-    stableState = reading;
-
-    if (stableState == BTN_PRESSED)   // срабатываем в момент нажатия
-    {
-      idx = (idx + 1) % NUM;
-      show();
-      isOn = true;
-      onStart = now;                  // отсчёт 10 секунд заново
-      Serial.print("Цвет: ");
-      Serial.println(idx + 1);
-    }
+    btnState = false;
   }
 }
 
